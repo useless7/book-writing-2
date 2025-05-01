@@ -1,0 +1,708 @@
+import json
+import datetime
+import uuid
+from typing import Dict, List, Any, Optional, Tuple, Union
+from dataclasses import dataclass, field, asdict
+
+# Constants to prevent hallucination
+MAX_SUGGESTIONS = 5  # Limit number of suggestions per request
+MAX_CONTENT_LENGTH = 5000  # Limit content generation length
+VALIDATION_THRESHOLD = 0.7  # Confidence threshold for agent output
+
+# Base classes
+@dataclass
+class BookMetadata:
+    """Core book information shared across agents"""
+    title: str
+    author: str
+    genre: str = "Non-Fiction"
+    target_audience: List[str] = field(default_factory=list)
+    core_concept: str = ""
+    unique_value_proposition: str = ""
+    created_at: str = field(default_factory=lambda: datetime.datetime.now().isoformat())
+    last_updated: str = field(default_factory=lambda: datetime.datetime.now().isoformat())
+    
+    def update(self):
+        """Update the last_updated timestamp"""
+        self.last_updated = datetime.datetime.now().isoformat()
+
+@dataclass
+class AgentOutput:
+    """Standard output format for all agents"""
+    agent_id: str
+    timestamp: str = field(default_factory=lambda: datetime.datetime.now().isoformat())
+    content: Any = None
+    confidence_score: float = 0.0
+    requires_human_review: bool = False
+    notes: str = ""
+    
+    def is_valid(self) -> bool:
+        """Check if the output meets quality threshold"""
+        return self.confidence_score >= VALIDATION_THRESHOLD
+
+class BaseAgent:
+    """Base class for all agents"""
+    def __init__(self, agent_id: str, name: str, description: str):
+        self.agent_id = agent_id
+        self.name = name
+        self.description = description
+        self.history: List[AgentOutput] = []
+    
+    def process(self, input_data: Any, book_metadata: BookMetadata) -> AgentOutput:
+        """Process input data and return output"""
+        raise NotImplementedError("Subclasses must implement this method")
+    
+    def add_to_history(self, output: AgentOutput):
+        """Add output to agent history"""
+        self.history.append(output)
+    
+    def get_last_output(self) -> Optional[AgentOutput]:
+        """Get the most recent output"""
+        return self.history[-1] if self.history else None
+
+class AgentManager:
+    """Manages agent workflow and prevents loops"""
+    def __init__(self):
+        self.agents: Dict[str, BaseAgent] = {}
+        self.book_metadata = BookMetadata(title="", author="")
+        self.workflow_state = "init"
+        self.current_agent_id = ""
+        self.max_iterations = 100
+        self.current_iteration = 0
+        self.completed_steps = set()
+        
+    def register_agent(self, agent: BaseAgent):
+        """Add an agent to the manager"""
+        self.agents[agent.agent_id] = agent
+        
+    def set_metadata(self, title: str, author: str):
+        """Initialize book metadata"""
+        self.book_metadata.title = title
+        self.book_metadata.author = author
+        
+    def run_agent(self, agent_id: str, input_data: Any) -> AgentOutput:
+        """Run a specific agent with input data"""
+        if agent_id not in self.agents:
+            raise ValueError(f"Agent {agent_id} not found")
+        
+        # Check for infinite loops
+        self.current_iteration += 1
+        if self.current_iteration > self.max_iterations:
+            raise RuntimeError("Maximum iterations reached, possible infinite loop detected")
+        
+        agent = self.agents[agent_id]
+        output = agent.process(input_data, self.book_metadata)
+        agent.add_to_history(output)
+        
+        # Mark this step as completed
+        self.completed_steps.add(agent_id)
+        
+        return output
+    
+    def validate_output(self, output: AgentOutput) -> bool:
+        """Validate agent output"""
+        if not output.is_valid():
+            return False
+            
+        # Additional validation logic could be added here
+        return True
+    
+    def reset_workflow(self):
+        """Reset the workflow state"""
+        self.workflow_state = "init"
+        self.current_agent_id = ""
+        self.current_iteration = 0
+        self.completed_steps = set()
+    
+    def get_next_agent(self, current_agent_id: str) -> Optional[str]:
+        """Determine the next agent in the workflow based on current state"""
+        workflow = {
+            # Planning Phase
+            "concept_agent": "market_research_agent",
+            "market_research_agent": "outline_architect_agent",
+            "outline_architect_agent": "project_management_agent",
+            "project_management_agent": "content_generation_agent",
+            
+            # Writing Phase
+            "content_generation_agent": "feedback_analyzer_agent",
+            "feedback_analyzer_agent": "content_revision_agent",
+            "content_revision_agent": "style_enhancement_agent",
+            "style_enhancement_agent": "editing_suite_agent",
+            
+            # Production Phase
+            "editing_suite_agent": "layout_design_agent",  # Parallel paths handled separately
+            "layout_design_agent": "technical_formatter_agent",
+            "cover_design_agent": "technical_formatter_agent",
+            "front_back_matter_agent": "technical_formatter_agent",
+            
+            # Publication Phase
+            "publication_strategist_agent": "technical_formatter_agent",
+            "technical_formatter_agent": None  # End of workflow
+        }
+        
+        # Special case for editing suite which branches to multiple agents
+        if current_agent_id == "editing_suite_agent":
+            # Return first agent that hasn't been completed yet
+            for next_agent in ["layout_design_agent", "cover_design_agent", "front_back_matter_agent"]:
+                if next_agent not in self.completed_steps:
+                    return next_agent
+            
+            # If all parallel agents are completed, move to publication phase
+            return "publication_strategist_agent"
+        
+        return workflow.get(current_agent_id)
+    
+    def execute_workflow(self, starting_agent_id: str, initial_input: Any) -> Dict[str, Any]:
+        """Execute the entire workflow starting from a specific agent"""
+        current_agent_id = starting_agent_id
+        current_input = initial_input
+        results = {}
+        
+        while current_agent_id:
+            print(f"Running agent: {current_agent_id}")
+            output = self.run_agent(current_agent_id, current_input)
+            
+            # Store results
+            results[current_agent_id] = asdict(output)
+            
+            # Validate output
+            if not self.validate_output(output):
+                print(f"Output validation failed for {current_agent_id}")
+                break
+            
+            # Check if human review is required
+            if output.requires_human_review:
+                print(f"Agent {current_agent_id} requires human review")
+                # In a real system, this would pause execution and wait for human input
+                human_feedback = {"approved": True}  # Simulated human feedback
+                output.notes += f" [Human reviewed: {datetime.datetime.now().isoformat()}]"
+            
+            # Get next agent
+            next_agent_id = self.get_next_agent(current_agent_id)
+            
+            # Set up for next iteration
+            current_agent_id = next_agent_id
+            current_input = output.content
+        
+        return results
+
+# Implementing specific agents
+class ConceptDevelopmentAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            agent_id="concept_agent",
+            name="Concept Development Agent",
+            description="Helps refine book's central idea and value proposition"
+        )
+    
+    def process(self, input_data: Dict[str, Any], book_metadata: BookMetadata) -> AgentOutput:
+        # Simplified implementation - in a real system this would have more logic
+        concept = input_data.get("concept", "")
+        
+        # Prevent hallucination by using only provided input
+        if not concept:
+            return AgentOutput(
+                agent_id=self.agent_id,
+                content=None,
+                confidence_score=0.0,
+                requires_human_review=True,
+                notes="No concept provided"
+            )
+        
+        # Process the concept (simplified)
+        refined_concept = f"Refined: {concept}"
+        unique_value = f"Unique value proposition based on: {concept}"
+        
+        # Update book metadata
+        book_metadata.core_concept = refined_concept
+        book_metadata.unique_value_proposition = unique_value
+        book_metadata.update()
+        
+        output = {
+            "refined_concept": refined_concept,
+            "unique_value_proposition": unique_value,
+            "concept_variations": [f"Variation {i+1} of {concept}" for i in range(min(3, MAX_SUGGESTIONS))],
+            "clarifying_questions": [
+                "Who is your primary audience?",
+                "What problem does your book solve?"
+            ]
+        }
+        
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=output,
+            confidence_score=0.85,
+            requires_human_review=True,  # Concept always needs human review
+            notes="Concept refined based on input"
+        )
+
+class MarketResearchAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            agent_id="market_research_agent",
+            name="Market Research Agent",
+            description="Evaluates market potential and identifies target audience"
+        )
+    
+    def process(self, input_data: Dict[str, Any], book_metadata: BookMetadata) -> AgentOutput:
+        # Extract concept information
+        concept = input_data.get("refined_concept", book_metadata.core_concept)
+        
+        # Simulated market research (would be more sophisticated in a real implementation)
+        target_audience = ["Professionals aged 30-45", "Subject enthusiasts", "Students"]
+        similar_books = [
+            {"title": "Similar Book 1", "author": "Author A", "unique_differences": "Less practical"},
+            {"title": "Similar Book 2", "author": "Author B", "unique_differences": "More academic"}
+        ]
+        
+        # Update book metadata
+        book_metadata.target_audience = target_audience
+        book_metadata.update()
+        
+        output = {
+            "target_audience": target_audience,
+            "similar_books": similar_books[:MAX_SUGGESTIONS],
+            "market_gaps": ["Practical advice", "Step-by-step guidance"],
+            "positioning_statement": f"This book uniquely addresses {concept} for {target_audience[0]}"
+        }
+        
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=output,
+            confidence_score=0.8,
+            requires_human_review=True,
+            notes="Market analysis completed"
+        )
+
+class OutlineArchitectAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            agent_id="outline_architect_agent",
+            name="Outline Architect Agent",
+            description="Structures book content logically"
+        )
+    
+    def process(self, input_data: Dict[str, Any], book_metadata: BookMetadata) -> AgentOutput:
+        # Use target audience to inform outline structure
+        target_audience = input_data.get("target_audience", book_metadata.target_audience)
+        concept = book_metadata.core_concept
+        
+        # Create chapter outline (simplified)
+        chapters = [
+            {
+                "title": "Introduction",
+                "sections": ["Problem Statement", "Book Overview", "How to Use This Book"],
+                "key_points": ["Establish credibility", "Present the problem", "Solution preview"]
+            },
+            {
+                "title": "Chapter 1: Understanding the Basics",
+                "sections": ["Core Concepts", "Historical Context", "Modern Applications"],
+                "key_points": ["Define terms", "Provide background", "Connect to present day"]
+            }
+        ]
+        
+        # Limit to prevent hallucination by generating too many chapters
+        max_chapters = min(10, MAX_SUGGESTIONS)
+        for i in range(3, max_chapters):
+            chapters.append({
+                "title": f"Chapter {i-1}: Advanced Topic {i-1}",
+                "sections": ["Section 1", "Section 2", "Section 3"],
+                "key_points": ["Key insight 1", "Key insight 2"]
+            })
+        
+        chapters.append({
+            "title": "Conclusion",
+            "sections": ["Summary", "Next Steps", "Resources"],
+            "key_points": ["Reinforce main ideas", "Call to action"]
+        })
+        
+        outline = {
+            "book_title": book_metadata.title or "Untitled Book",
+            "concept_summary": concept,
+            "audience": target_audience,
+            "chapters": chapters,
+            "estimated_length": f"{len(chapters) * 15}-{len(chapters) * 25} pages"
+        }
+        
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=outline,
+            confidence_score=0.9,
+            requires_human_review=True,
+            notes="Outline created based on concept and target audience"
+        )
+
+# Implementing the remaining agents with simplified logic
+class ProjectManagementAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            agent_id="project_management_agent",
+            name="Project Management Agent",
+            description="Establishes timelines and milestones"
+        )
+    
+    def process(self, input_data: Dict[str, Any], book_metadata: BookMetadata) -> AgentOutput:
+        # Extract chapter information from outline
+        chapters = input_data.get("chapters", [])
+        
+        # Create timeline based on chapters (simplified)
+        start_date = datetime.datetime.now()
+        milestones = []
+        
+        for i, chapter in enumerate(chapters):
+            # Add 2 weeks per chapter for writing
+            milestone_date = start_date + datetime.timedelta(weeks=2*(i+1))
+            milestones.append({
+                "name": f"Complete {chapter.get('title', f'Chapter {i}')}",
+                "target_date": milestone_date.strftime("%Y-%m-%d"),
+                "duration_days": 14,
+                "prerequisites": [] if i == 0 else [f"Complete {chapters[i-1].get('title', f'Chapter {i-1}')}"]
+            })
+        
+        # Add editing milestone
+        edit_date = start_date + datetime.timedelta(weeks=2*len(chapters) + 4)
+        milestones.append({
+            "name": "Complete Editing",
+            "target_date": edit_date.strftime("%Y-%m-%d"),
+            "duration_days": 30,
+            "prerequisites": [f"Complete {chapters[-1].get('title', f'Chapter {len(chapters)-1}')}"]
+        })
+        
+        # Add production milestone
+        production_date = edit_date + datetime.timedelta(weeks=4)
+        milestones.append({
+            "name": "Complete Production",
+            "target_date": production_date.strftime("%Y-%m-%d"),
+            "duration_days": 30,
+            "prerequisites": ["Complete Editing"]
+        })
+        
+        timeline = {
+            "project_start": start_date.strftime("%Y-%m-%d"),
+            "estimated_completion": production_date.strftime("%Y-%m-%d"),
+            "total_duration_weeks": (production_date - start_date).days // 7,
+            "milestones": milestones
+        }
+        
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=timeline,
+            confidence_score=0.85,
+            requires_human_review=True,
+            notes="Timeline created based on outline"
+        )
+
+class ContentGenerationAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            agent_id="content_generation_agent",
+            name="Content Generation Agent",
+            description="Assists with first draft creation"
+        )
+    
+    def process(self, input_data: Dict[str, Any], book_metadata: BookMetadata) -> AgentOutput:
+        # Extract timeline and outline information
+        milestones = input_data.get("milestones", [])
+        
+        # Get the current milestone to work on
+        current_milestone = next((m for m in milestones if not m.get("completed", False)), None)
+        
+        if not current_milestone:
+            return AgentOutput(
+                agent_id=self.agent_id,
+                content=None,
+                confidence_score=0.0,
+                requires_human_review=True,
+                notes="No milestones to work on"
+            )
+        
+        # Generate sample content for current milestone (simplified)
+        milestone_name = current_milestone.get("name", "")
+        chapter_title = milestone_name.replace("Complete ", "")
+        
+        # Generate chapter content (simplified)
+        content = {
+            "chapter_title": chapter_title,
+            "chapter_intro": f"Introduction to {chapter_title}...",
+            "sections": [
+                {
+                    "title": "Section 1",
+                    "content": "Content for section 1..." * 10,  # Simulated content
+                    "examples": ["Example 1", "Example 2"]
+                },
+                {
+                    "title": "Section 2",
+                    "content": "Content for section 2..." * 10,  # Simulated content
+                    "examples": ["Example 3", "Example 4"]
+                }
+            ],
+            "chapter_summary": f"Summary of {chapter_title}...",
+            "word_count": 2500  # Simulated word count
+        }
+        
+        # Ensure content doesn't exceed limits
+        content_length = sum(len(s["content"]) for s in content["sections"])
+        if content_length > MAX_CONTENT_LENGTH:
+            # Truncate content to prevent hallucination
+            for s in content["sections"]:
+                s["content"] = s["content"][:MAX_CONTENT_LENGTH // len(content["sections"])]
+        
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=content,
+            confidence_score=0.75,
+            requires_human_review=True,
+            notes=f"Draft content generated for {chapter_title}"
+        )
+
+class FeedbackAnalyzerAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            agent_id="feedback_analyzer_agent",
+            name="Feedback Analyzer Agent",
+            description="Processes and synthesizes reader feedback"
+        )
+    
+    def process(self, input_data: Dict[str, Any], book_metadata: BookMetadata) -> AgentOutput:
+        # Extract chapter content
+        chapter_title = input_data.get("chapter_title", "")
+        
+        # Simulate feedback (would come from external sources in a real system)
+        simulated_feedback = [
+            {"source": "Beta Reader 1", "comment": "The introduction is clear but too long", "section": "chapter_intro", "severity": "medium"},
+            {"source": "Beta Reader 2", "comment": "Need more examples in Section 2", "section": "Section 2", "severity": "high"},
+            {"source": "Beta Reader 1", "comment": "Great insights in Section 1", "section": "Section 1", "severity": "positive"}
+        ]
+        
+        # Analyze feedback (simplified)
+        analysis = {
+            "chapter": chapter_title,
+            "feedback_summary": {
+                "positive_points": ["Great insights in Section 1"],
+                "improvement_areas": ["Introduction length", "More examples needed"],
+                "recurring_themes": ["Need for more examples"]
+            },
+            "prioritized_actions": [
+                {"action": "Add more examples to Section 2", "priority": "high"},
+                {"action": "Shorten introduction", "priority": "medium"}
+            ],
+            "raw_feedback": simulated_feedback
+        }
+        
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=analysis,
+            confidence_score=0.8,
+            requires_human_review=False,
+            notes=f"Feedback analyzed for {chapter_title}"
+        )
+
+class ContentRevisionAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            agent_id="content_revision_agent",
+            name="Content Revision Agent",
+            description="Helps implement improvements based on feedback"
+        )
+    
+    def process(self, input_data: Dict[str, Any], book_metadata: BookMetadata) -> AgentOutput:
+        # Extract feedback analysis
+        prioritized_actions = input_data.get("prioritized_actions", [])
+        chapter = input_data.get("chapter", "")
+        
+        # Simulate revision suggestions (simplified)
+        revision_plan = {
+            "chapter": chapter,
+            "revision_actions": []
+        }
+        
+        for action in prioritized_actions:
+            revision_plan["revision_actions"].append({
+                "action": action.get("action", ""),
+                "suggestion": f"Suggested implementation for {action.get('action', '')}"[:100],
+                "priority": action.get("priority", "medium")
+            })
+        
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=revision_plan,
+            confidence_score=0.85,
+            requires_human_review=True,
+            notes=f"Revision plan created for {chapter}"
+        )
+
+class StyleEnhancementAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            agent_id="style_enhancement_agent",
+            name="Style Enhancement Agent",
+            description="Polishes writing style and voice"
+        )
+    
+    def process(self, input_data: Dict[str, Any], book_metadata: BookMetadata) -> AgentOutput:
+        # Extract revision plan
+        chapter = input_data.get("chapter", "")
+        
+        # Simulate style enhancement (simplified)
+        style_suggestions = {
+            "chapter": chapter,
+            "overall_tone": "Professional but conversational",
+            "sentence_variety": "Good mix of lengths, could improve transitions",
+            "vocabulary_suggestions": [
+                {"original": "use", "suggested": "utilize", "context": "In this context"},
+                {"original": "important", "suggested": "crucial", "context": "For emphasis"}
+            ][:MAX_SUGGESTIONS],
+            "readability_score": 75,  # Simulated score
+            "readability_improvements": [
+                "Break up paragraph 3 into smaller chunks",
+                "Add subheadings to section 2"
+            ]
+        }
+        
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=style_suggestions,
+            confidence_score=0.8,
+            requires_human_review=False,
+            notes=f"Style enhancements suggested for {chapter}"
+        )
+
+class EditingSuiteAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            agent_id="editing_suite_agent",
+            name="Editing Suite Agent",
+            description="Handles various editing functions"
+        )
+    
+    def process(self, input_data: Dict[str, Any], book_metadata: BookMetadata) -> AgentOutput:
+        # Extract chapter information
+        chapter = input_data.get("chapter", "")
+        
+        # Simulate editing (simplified)
+        editing_results = {
+            "chapter": chapter,
+            "grammar_issues": [
+                {"type": "Subject-verb agreement", "location": "Paragraph 2", "suggestion": "Change 'is' to 'are'"},
+                {"type": "Punctuation", "location": "Paragraph 5", "suggestion": "Add comma after introductory phrase"}
+            ][:MAX_SUGGESTIONS],
+            "consistency_issues": [
+                {"type": "Terminology", "inconsistent_terms": ["website", "web site"], "recommendation": "Use 'website' consistently"}
+            ][:MAX_SUGGESTIONS],
+            "developmental_edits": [
+                {"section": "Introduction", "issue": "Missing hook", "suggestion": "Add compelling opening question"},
+                {"section": "Section 2", "issue": "Weak transition", "suggestion": "Connect ideas between paragraphs 3 and 4"}
+            ][:MAX_SUGGESTIONS],
+            "edited_status": "Ready for layout"
+        }
+        
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=editing_results,
+            confidence_score=0.9,
+            requires_human_review=True,
+            notes=f"Editing completed for {chapter}"
+        )
+
+class LayoutDesignAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            agent_id="layout_design_agent",
+            name="Layout Design Agent",
+            description="Formats book interior professionally"
+        )
+    
+    def process(self, input_data: Dict[str, Any], book_metadata: BookMetadata) -> AgentOutput:
+        # Use edited chapter information
+        chapter = input_data.get("chapter", "")
+        
+        # Simulate layout design (simplified)
+        layout_design = {
+            "chapter": chapter,
+            "typography": {
+                "body_text_font": "Garamond",
+                "heading_font": "Helvetica",
+                "body_text_size": "11pt",
+                "line_spacing": "1.5",
+                "margins": {"top": "1in", "bottom": "1in", "inner": "1.25in", "outer": "1in"}
+            },
+            "layout_elements": [
+                {"element": "Chapter title", "formatting": "24pt, centered, 2in from top"},
+                {"element": "Section headings", "formatting": "14pt, left-aligned, bold"},
+                {"element": "Block quotes", "formatting": "Indented 0.5in, italicized"},
+                {"element": "Footnotes", "formatting": "9pt, single-spaced"}
+            ],
+            "special_elements": [
+                {"element": "Pull quotes", "placement": "Right margin, every 5 pages"},
+                {"element": "Images", "placement": "Centered, with captions below"}
+            ]
+        }
+        
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=layout_design,
+            confidence_score=0.85,
+            requires_human_review=True,
+            notes=f"Layout design created for {chapter}"
+        )
+
+class CoverDesignConsultantAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            agent_id="cover_design_agent",
+            name="Cover Design Consultant Agent",
+            description="Guides cover design process"
+        )
+    
+    def process(self, input_data: Dict[str, Any], book_metadata: BookMetadata) -> AgentOutput:
+        # Use edited content to inform cover design
+        title = book_metadata.title
+        author = book_metadata.author
+        genre = book_metadata.genre
+        
+        # Simulate cover design concepts (simplified)
+        cover_design = {
+            "title_treatment": {
+                "font": "Montserrat Bold",
+                "size": "Large, prominent",
+                "color": "Deep blue"
+            },
+            "author_name_treatment": {
+                "font": "Montserrat Light",
+                "size": "Medium",
+                "color": "White"
+            },
+            "cover_concepts": [
+                {
+                    "concept": "Minimalist approach",
+                    "color_scheme": "Blue and white gradient",
+                    "imagery": "Abstract representation of main concept"
+                },
+                {
+                    "concept": "Bold typography",
+                    "color_scheme": "Strong contrast, black and yellow",
+                    "imagery": "Large title with small symbolic image"
+                }
+            ][:MAX_SUGGESTIONS],
+            "genre_considerations": f"Following {genre} design conventions while standing out"
+        }
+        
+        return AgentOutput(
+            agent_id=self.agent_id,
+            content=cover_design,
+            confidence_score=0.8,
+            requires_human_review=True,
+            notes="Cover design concepts created"
+        )
+
+class FrontBackMatterAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            agent_id="front_back_matter_agent",
+            name="Front/Back Matter Agent",
+            description="Creates supplementary book elements"
+        )
+    
+    def process(self, input_data: Dict[str, Any], book_metadata: BookMetadata) -> AgentOutput:
+        # Extract book information
+        title = book_
